@@ -3,8 +3,10 @@
 import ts3
 import requests
 from threading import Thread
+import socket
+import os
 
-#ApiHost = 'http://wgauth.mir-ts.ru'
+# ApiHost = 'http://wgauth.mir-ts.ru'
 ApiHost = 'http://wg-auth.service-voice.com'
 
 
@@ -16,7 +18,6 @@ def log_add(level, message, thread_name=''):
 
 
 class TeamSpeakServerBot(Thread):
-
     def __init__(self, ip='127.0.0.1', port=10011, login='serveradmin', password='', server_uid='',
                  module_config={None}):
         Thread.__init__(self)
@@ -28,6 +29,7 @@ class TeamSpeakServerBot(Thread):
         self.module_config = module_config
         self.last_raw_event = ''
         self.event_callback = {}
+        self.exit_flag = False
 
     def return_server_id_by_uid(self, uid):
         for VirtualServer in self.ts3.serverlist(uid=True):
@@ -71,7 +73,11 @@ class TeamSpeakServerBot(Thread):
                 # This method blocks, but we must sent the keepalive message at
                 # least once in 10 minutes. So we set the timeout parameter to
                 # 9 minutes.
-                events = self.ts3.wait_for_event(timeout=550)
+                events = self.ts3.wait_for_event(timeout=5)
+
+                if self.exit_flag is True:
+                    exit(0)
+
             except ts3.query.TS3TimeoutError:
                 pass
             else:
@@ -117,11 +123,21 @@ class TeamSpeakServerBot(Thread):
 
                     r = requests.post(self.module_config.get('wg_auth_bot').get('url'),
                                       json={"client_uid": client_uid, "server_uid": self.server_uid})
-
-                    url = self.module_config.get('wg_auth_bot').get('url') + "/" + r.text
+                    data = r.json()
+                    if data["verify"] == 'successfully':
+                        message = 'Вы были успешно авторизированы'
+                    elif data["verify"] == 'ClanNotAllowedOrNoClan':
+                        message = 'Вы не состоите в клане или состоите в недопустимом клане или кеш данных ещё не обновился, попробуйте через 30 минут.'
+                    elif data["verify"] == 'ModuleIsDisabled':
+                        message = 'Данный модуль отключен для этого сервера, не понятно как вы смогли получить ссылку'
+                    elif data["verify"] == 'ServerNotFound':
+                        message = 'Сервер не найден в базе данных'
+                    elif data["verify"] == 'AuthorizationRequired':
+                        message = 'Перейдите по ссылке: [url]' + str(self.module_config.get('wg_auth_bot').get('url')) + "/" + str(
+                            data["verify_id"])+'[/url]'
 
                     self.ts3.sendtextmessage(targetmode=1, target=event_data.get("clid"),
-                                             msg=self.module_config.get('wg_auth_bot').get('message') % url)
+                                             msg=message)
 
         except ts3.query.TS3QueryError as e:
             log_add('error',
@@ -154,21 +170,71 @@ class TeamSpeakServerBot(Thread):
                             'модуль ' + str(callback) + ' завершил работу с ошибкой при событии: ' + event_name,
                             thread_name=self.getName())
 
+    def exit(self):
+        self.exit_flag = True
+
+
+class TelnetInterfaces(Thread):
+    admin_port = 4000
+
+    def __init__(self):
+        Thread.__init__(self)
+
+    def run(self):
+        SendClientText = ''
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(('0.0.0.0', self.admin_port))
+        s.listen(3)
+        log_add('warn', 'Прослушивается административный интерфейс на порту: ' + str(self.admin_port),
+                thread_name=self.getName())
+
+        conn, addr = s.accept()
+
+        log_add('warn', 'К административному интерфейсу подключился клиент с ip: ' + str(addr),
+                thread_name=self.getName())
+        while 1:
+            data = conn.recv(3024)
+            if not data: break
+            log_add('warn', 'Была получена команда:' + str(data.decode()))
+            if str(data.decode()) == 'stop':
+                os._exit(os.F_OK)
+            if str(data.decode()) == 'quit':
+                break
+        conn.close()
+
+
+class AdminInterfaces:
+    def __init__(self):
+        self.bot_config = dict()
+        self.threads = {}
+
+    def kill_all_bot(self):
+        for ServerUID in self.threads:
+            self.threads[ServerUID].exit()
+
+    def start_all_bot(self):
+        for ServerUID, Server in self.bot_config.items():
+            self.threads[ServerUID] = TeamSpeakServerBot(ip=Server.get('ip'), port=Server.get('port'),
+                                                         password=Server.get('password'),
+                                                         server_uid=Server.get('uid'),
+                                                         module_config=Server.get('module'))
+            self.threads[ServerUID].setName(ServerUID)
+            self.threads[ServerUID].start()
+            self.threads[ServerUID].join(1)
+
+    def reload_all_bot_config(self):
+        log_add("info", "Загрузка конфигурации воркеров")
+        r = requests.get(ApiHost + '/teamspeak/worker/config')
+        log_add("info", "Конфигурация воркера:")
+        self.bot_config = r.json()
+        log_add("info", self.bot_config)
+
 
 if __name__ == "__main__":
-    threads = {}
-    log_add("info", "Загрузка конфигурации воркера")
-    r = requests.get(ApiHost + '/teamspeak/worker/config')
-    log_add("info", "Конфигурация воркера:")
-    log_add("info", r.json())
+    AdminInterfaces = AdminInterfaces()
+    AdminInterfaces.reload_all_bot_config()
+    AdminInterfaces.start_all_bot()
 
-    Servers = r.json()
-
-    for ServerUID, Server in Servers.items():
-        threads[ServerUID] = TeamSpeakServerBot(ip=Server.get('ip'), port=Server.get('port'),
-                                                password=Server.get('password'),
-                                                server_uid=Server.get('uid'),
-                                                module_config=Server.get('module'))
-        threads[ServerUID].setName(ServerUID)
-        threads[ServerUID].start()
-        #threads[ServerUID].join(1)
+    TelnetInterfaces = TelnetInterfaces()
+    TelnetInterfaces.setName("AdminInterfaces")
+    TelnetInterfaces.start()
