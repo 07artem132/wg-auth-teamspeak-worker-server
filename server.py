@@ -6,8 +6,10 @@ from threading import Thread
 import socket
 import os
 
-# ApiHost = 'http://wgauth.mir-ts.ru'
-ApiHost = 'http://wg-auth.service-voice.com'
+ApiHost = 'http://wgauth.mir-ts.ru'
+
+
+# ApiHost = 'http://wg-auth.service-voice.com'
 
 
 def log_add(level, message, thread_name=''):
@@ -66,7 +68,7 @@ class TeamSpeakServerBot(Thread):
                     log_add('info', 'модуль не загружен: ' + str(modules), thread_name=self.getName())
         self.ts3.servernotifyregister(event="server")
         self.ts3.servernotifyregister(event="channel", id_=0)
-        self.ts3.servernotifyregister(event="textprivate")
+        # self.ts3.servernotifyregister(event="textprivate")
         while True:
             self.ts3.send_keepalive()
             try:
@@ -123,22 +125,27 @@ class TeamSpeakServerBot(Thread):
 
                     r = requests.post(self.module_config.get('wg_auth_bot').get('url'),
                                       json={"client_uid": client_uid, "server_uid": self.server_uid})
-                    data = r.json()
-                    if data["verify"] == 'successfully':
-                        message = 'Вы были успешно авторизированы'
-                    elif data["verify"] == 'ClanNotAllowedOrNoClan':
-                        message = 'Вы не состоите в клане или состоите в недопустимом клане или кеш данных ещё не обновился, попробуйте через 30 минут.'
-                    elif data["verify"] == 'ModuleIsDisabled':
-                        message = 'Данный модуль отключен для этого сервера, не понятно как вы смогли получить ссылку'
-                    elif data["verify"] == 'ServerNotFound':
-                        message = 'Сервер не найден в базе данных'
-                    elif data["verify"] == 'AuthorizationRequired':
-                        message = 'Перейдите по ссылке: [url]' + str(self.module_config.get('wg_auth_bot').get('url')) + "/" + str(
-                            data["verify_id"])+'[/url]'
+                    if r.status_code == 200:
+                        data = r.json()
+                        if data["verify"] == 'successfully':
+                            message = 'Вы были успешно авторизированы'
+                        elif data["verify"] == 'ClanNotAllowedOrNoClan':
+                            message = 'Вы не состоите в клане или состоите в недопустимом клане или кеш данных ещё не обновился, попробуйте через 30 минут.'
+                        elif data["verify"] == 'ModuleIsDisabled':
+                            message = 'Данный модуль отключен для этого сервера, не понятно как вы смогли получить ссылку'
+                        elif data["verify"] == 'ServerNotFound':
+                            message = 'Сервер не найден в базе данных'
+                        elif data["verify"] == 'AuthorizationRequired':
+                            message = 'Перейдите по ссылке: [url]' + str(
+                                self.module_config.get('wg_auth_bot').get('url')) + "/" + str(
+                                data["verify_id"]) + '[/url]'
 
-                    self.ts3.sendtextmessage(targetmode=1, target=event_data.get("clid"),
-                                             msg=message)
-
+                        self.ts3.sendtextmessage(targetmode=1, target=event_data.get("clid"),
+                                                 msg=message)
+                    else:
+                        log_add('error',
+                                'в модуле wg_auth_bot возникла ошибка: ' + str(r.text),
+                                thread_name=self.getName())
         except ts3.query.TS3QueryError as e:
             log_add('error',
                     'в модуле hello_bot возникла ошибка: ' + str(e.resp.error["msg"]) + ' данные события: \n' + str(
@@ -147,7 +154,11 @@ class TeamSpeakServerBot(Thread):
             raise
 
     def nickname_change(self):
-        self.ts3.clientupdate(client_nickname=self.module_config.get('nickname_change').get('nickname'))
+        try:
+            self.ts3.clientupdate(client_nickname=self.module_config.get('nickname_change').get('nickname'))
+        except ts3.query.TS3QueryError as e:
+            log_add('error',
+                    'в модуле nickname_change возникла ошибка: ' + str(e.resp.error["msg"]), thread_name=self.getName())
 
     def add_event_callback(self, event_name, functions):
         if self.event_callback.get(event_name, 0) == 0:
@@ -200,12 +211,15 @@ class TelnetInterfaces(Thread):
                 os._exit(os.F_OK)
             if str(data.decode()) == 'quit':
                 break
+            if str(data.decode()) == 'reload':
+                AdminInterfaces.reload_all_bot_config()
         conn.close()
 
 
 class AdminInterfaces:
     def __init__(self):
         self.bot_config = dict()
+        self.bot_config_new = dict()
         self.threads = {}
 
     def kill_all_bot(self):
@@ -223,6 +237,43 @@ class AdminInterfaces:
             self.threads[ServerUID].join(1)
 
     def reload_all_bot_config(self):
+        if len(self.bot_config) != 0:
+            log_add("info", "Конфигурация бота уже была загружена, начинаем процесс обновления конфига")
+            r = requests.get(ApiHost + '/teamspeak/worker/config')
+            log_add("info", "Новая конфигурация воркера:")
+            self.bot_config_new = r.json()
+            log_add("info", self.bot_config_new)
+            for ServerUID, Server in self.bot_config.items():
+                if ServerUID in self.bot_config_new:
+                    for key, val in self.bot_config_new[ServerUID].items():
+                        if key in self.bot_config[ServerUID]:
+                            if key != 'module' and self.bot_config[ServerUID][key] != val:
+                                self.threads[ServerUID].exit()
+                                self.threads[ServerUID] = TeamSpeakServerBot(ip=Server.get('ip'),
+                                                                             port=Server.get('port'),
+                                                                             password=Server.get('password'),
+                                                                             server_uid=Server.get('uid'),
+                                                                             module_config=Server.get('module'))
+                                self.threads[ServerUID].setName(ServerUID)
+                                self.threads[ServerUID].start()
+                            if key == 'module':
+                                for key_module, val_module in self.bot_config_new[ServerUID][key].items():
+                                    if key_module in self.bot_config[ServerUID][key]:
+                                        if self.bot_config[ServerUID][key][key_module] != val_module:
+                                            self.threads[ServerUID].exit()
+                                            self.threads[ServerUID] = TeamSpeakServerBot(ip=Server.get('ip'),
+                                                                                         port=Server.get('port'),
+                                                                                         password=Server.get(
+                                                                                             'password'),
+                                                                                         server_uid=Server.get('uid'),
+                                                                                         module_config=Server.get(
+                                                                                             'module'))
+                                            self.threads[ServerUID].setName(ServerUID)
+                                            self.threads[ServerUID].start()
+                else:
+                    self.threads[ServerUID].exit()
+            log_add("info", "Перезагрузка конфигурации воркеров успешно завершена")
+            return
         log_add("info", "Загрузка конфигурации воркеров")
         r = requests.get(ApiHost + '/teamspeak/worker/config')
         log_add("info", "Конфигурация воркера:")
