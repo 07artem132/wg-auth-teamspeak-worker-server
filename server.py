@@ -6,10 +6,8 @@ from threading import Thread
 import socket
 import os
 
-ApiHost = 'http://wgauth.mir-ts.ru'
-
-
-# ApiHost = 'http://wg-auth.service-voice.com'
+# ApiHost = 'http://wgauth.mir-ts.ru'
+ApiHost = 'http://wg-auth.service-voice.com'
 
 
 def log_add(level, message, thread_name=''):
@@ -75,11 +73,12 @@ class TeamSpeakServerBot(Thread):
                 # This method blocks, but we must sent the keepalive message at
                 # least once in 10 minutes. So we set the timeout parameter to
                 # 9 minutes.
-                events = self.ts3.wait_for_event(timeout=5)
+                events = self.ts3.wait_for_event(timeout=1)
 
                 if self.exit_flag is True:
-                    exit(0)
-
+                    self.ts3.quit()
+                    log_add('warn', 'Поток остановлен ', thread_name=self.getName())
+                    return
             except ts3.query.TS3TimeoutError:
                 pass
             else:
@@ -88,19 +87,28 @@ class TeamSpeakServerBot(Thread):
                 else:
                     log_add('info', 'наступило событие ' + events.event, thread_name=self.getName())
                     self.call_callback_event(events.event, events[0])
-                self.last_raw_event = str(events[0])
+                    self.last_raw_event = str(events[0])
 
     def hello_bot(self):
         self.add_event_callback('notifycliententerview', 'hello_bot_callback')
 
     def hello_bot_callback(self, event_data):
+        if event_data.get('client_type') == '1':
+            return
         try:
             if self.client_is_joined_default_server_group(self.return_client_dbid_by_clid(event_data.get("clid"))):
-                self.ts3.sendtextmessage(targetmode=1, target=event_data.get("clid"),
-                                         msg=self.module_config.get('hello_bot').get('message'))
-                log_add('info', 'пользователю с id ' + event_data.get(
-                    "clid") + ' было отправлено сообщение "' + self.module_config.get(
-                    'hello_bot').get('message') + '"', thread_name=self.getName())
+                if self.module_config.get('hello_bot').get('message_type') == 'message':
+                    self.ts3.sendtextmessage(targetmode=1, target=event_data.get("clid"),
+                                             msg=self.module_config.get('hello_bot').get('message'))
+                    log_add('info', 'пользователю с id ' + event_data.get(
+                        "clid") + ' было отправлено сообщение "' + self.module_config.get(
+                        'hello_bot').get('message') + '"', thread_name=self.getName())
+                elif self.module_config.get('hello_bot').get('message_type') == 'poke':
+                    self.ts3.clientpoke(clid=event_data.get("clid"),
+                                        msg=self.module_config.get('hello_bot').get('message'))
+                    log_add('info', 'пользователю с id ' + event_data.get(
+                        "clid") + ' было отправлено сообщение "' + self.module_config.get(
+                        'hello_bot').get('message') + '"', thread_name=self.getName())
             else:
                 log_add('info', 'пользователь с id ' + event_data.get(
                     "clid") + ' уже авторизирован, и ему сообщение не отправлялось', thread_name=self.getName())
@@ -113,6 +121,11 @@ class TeamSpeakServerBot(Thread):
 
     def wg_auth_bot(self):
         self.add_event_callback('notifyclientmoved', 'wg_auth_bot_callback')
+
+    def return_default_channel_id(self):
+        for channel in self.ts3.channellist(flags=True):
+            if channel.get('channel_flag_default') == '1':
+                return channel.get('cid')
 
     def wg_auth_bot_callback(self, event_data):
         try:
@@ -128,20 +141,36 @@ class TeamSpeakServerBot(Thread):
                     if r.status_code == 200:
                         data = r.json()
                         if data["verify"] == 'successfully':
-                            message = 'Вы были успешно авторизированы'
+                            message = self.module_config.get('wg_auth_bot').get('message_success')
+                            if self.module_config.get('wg_auth_bot').get('move_to_default_channel') == 'enable':
+                                self.ts3.clientmove(clid=event_data.get("clid"), cid=self.return_default_channel_id())
                         elif data["verify"] == 'ClanNotAllowedOrNoClan':
-                            message = 'Вы не состоите в клане или состоите в недопустимом клане или кеш данных ещё не обновился, попробуйте через 30 минут.'
+                            message = self.module_config.get('wg_auth_bot').get(
+                                'message_error_clan_not_allowed_or_no_clan')
+                            if self.module_config.get('wg_auth_bot').get('move_to_default_channel') == 'enable':
+                                self.ts3.clientmove(clid=event_data.get("clid"), cid=self.return_default_channel_id())
                         elif data["verify"] == 'ModuleIsDisabled':
-                            message = 'Данный модуль отключен для этого сервера, не понятно как вы смогли получить ссылку'
+                            message = self.module_config.get('wg_auth_bot').get('message_error_module_is_disabled')
+                            if self.module_config.get('wg_auth_bot').get('move_to_default_channel') == 'enable':
+                                self.ts3.clientmove(clid=event_data.get("clid"), cid=self.return_default_channel_id())
                         elif data["verify"] == 'ServerNotFound':
-                            message = 'Сервер не найден в базе данных'
+                            message = self.module_config.get('wg_auth_bot').get('message_error_server_not_found')
+                            if self.module_config.get('wg_auth_bot').get('move_to_default_channel') == 'enable':
+                                self.ts3.clientmove(clid=event_data.get("clid"), cid=self.return_default_channel_id())
                         elif data["verify"] == 'AuthorizationRequired':
-                            message = 'Перейдите по ссылке: [url]' + str(
-                                self.module_config.get('wg_auth_bot').get('url')) + "/" + str(
-                                data["verify_id"]) + '[/url]'
+                            message = self.module_config.get('wg_auth_bot').get('message_authorization_required') % str(
+                                self.module_config.get('wg_auth_bot').get('url')) + '/' + str(data["verify_id"])
 
-                        self.ts3.sendtextmessage(targetmode=1, target=event_data.get("clid"),
-                                                 msg=message)
+                        if self.module_config.get('wg_auth_bot').get('message_type') == 'message':
+                            self.ts3.sendtextmessage(targetmode=1, target=event_data.get("clid"),
+                                                     msg=message)
+                            log_add('info', 'пользователю с id ' + event_data.get(
+                                "clid") + ' было отправлено сообщение "' + message + '"', thread_name=self.getName())
+                        elif self.module_config.get('wg_auth_bot').get('message_type') == 'poke':
+                            self.ts3.clientpoke(clid=event_data.get("clid"), msg=message)
+                            log_add('info', 'пользователю с id ' + event_data.get(
+                                "clid") + ' было отправлено сообщение "' + message + '"', thread_name=self.getName())
+
                     else:
                         log_add('error',
                                 'в модуле wg_auth_bot возникла ошибка: ' + str(r.text),
@@ -249,11 +278,16 @@ class AdminInterfaces:
                         if key in self.bot_config[ServerUID]:
                             if key != 'module' and self.bot_config[ServerUID][key] != val:
                                 self.threads[ServerUID].exit()
-                                self.threads[ServerUID] = TeamSpeakServerBot(ip=Server.get('ip'),
-                                                                             port=Server.get('port'),
-                                                                             password=Server.get('password'),
-                                                                             server_uid=Server.get('uid'),
-                                                                             module_config=Server.get('module'))
+                                self.threads[ServerUID] = TeamSpeakServerBot(ip=self.bot_config_new[ServerUID]['ip'],
+                                                                             port=self.bot_config_new[ServerUID][
+                                                                                 'port'],
+                                                                             password=self.bot_config_new[ServerUID][
+                                                                                 'password'],
+                                                                             server_uid=self.bot_config_new[ServerUID][
+                                                                                 'uid'],
+                                                                             module_config=
+                                                                             self.bot_config_new[ServerUID][
+                                                                                 'module'])
                                 self.threads[ServerUID].setName(ServerUID)
                                 self.threads[ServerUID].start()
                             if key == 'module':
@@ -261,17 +295,32 @@ class AdminInterfaces:
                                     if key_module in self.bot_config[ServerUID][key]:
                                         if self.bot_config[ServerUID][key][key_module] != val_module:
                                             self.threads[ServerUID].exit()
-                                            self.threads[ServerUID] = TeamSpeakServerBot(ip=Server.get('ip'),
-                                                                                         port=Server.get('port'),
-                                                                                         password=Server.get(
-                                                                                             'password'),
-                                                                                         server_uid=Server.get('uid'),
-                                                                                         module_config=Server.get(
-                                                                                             'module'))
+                                            self.threads[ServerUID] = TeamSpeakServerBot(
+                                                ip=self.bot_config_new[ServerUID]['ip'],
+                                                port=self.bot_config_new[ServerUID]['port'],
+                                                password=self.bot_config_new[ServerUID][
+                                                    'password'],
+                                                server_uid=self.bot_config_new[ServerUID][
+                                                    'uid'],
+                                                module_config=self.bot_config_new[ServerUID][
+                                                    'module'])
                                             self.threads[ServerUID].setName(ServerUID)
                                             self.threads[ServerUID].start()
                 else:
                     self.threads[ServerUID].exit()
+            if len(self.bot_config_new) > 0:
+                for ServerUID, Server in self.bot_config_new.items():
+                    if ServerUID in self.bot_config:
+                        print('')
+                    else:
+                        self.threads[ServerUID] = TeamSpeakServerBot(ip=Server.get('ip'), port=Server.get('port'),
+                                                                     password=Server.get('password'),
+                                                                     server_uid=Server.get('uid'),
+                                                                     module_config=Server.get('module'))
+                        self.threads[ServerUID].setName(ServerUID)
+                        self.threads[ServerUID].start()
+                        self.threads[ServerUID].join(1)
+
             log_add("info", "Перезагрузка конфигурации воркеров успешно завершена")
             return
         log_add("info", "Загрузка конфигурации воркеров")
