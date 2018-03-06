@@ -5,9 +5,10 @@ import requests
 from threading import Thread
 import socket
 import os
+import time
 
-# ApiHost = 'http://wgauth.mir-ts.ru'
-ApiHost = 'http://wg-auth.service-voice.com'
+ApiHost = 'http://wgauth.mir-ts.ru'
+# ApiHost = 'http://wg-auth.service-voice.com'
 
 
 def log_add(level, message, thread_name=''):
@@ -104,11 +105,13 @@ class TeamSpeakServerBot(Thread):
                         "clid") + ' было отправлено сообщение "' + self.module_config.get(
                         'hello_bot').get('message') + '"', thread_name=self.getName())
                 elif self.module_config.get('hello_bot').get('message_type') == 'poke':
-                    self.ts3.clientpoke(clid=event_data.get("clid"),
-                                        msg=self.module_config.get('hello_bot').get('message'))
-                    log_add('info', 'пользователю с id ' + event_data.get(
-                        "clid") + ' было отправлено сообщение "' + self.module_config.get(
-                        'hello_bot').get('message') + '"', thread_name=self.getName())
+                    result = self.module_config.get('hello_bot').get('message').split('-')
+                    for message in result:
+                        self.ts3.clientpoke(clid=event_data.get("clid"),
+                                            msg=message)
+                        log_add('info', 'пользователю с id ' + event_data.get(
+                            "clid") + ' было отправлено сообщение "' + self.module_config.get(
+                            'hello_bot').get('message') + '"', thread_name=self.getName())
             else:
                 log_add('info', 'пользователь с id ' + event_data.get(
                     "clid") + ' уже авторизирован, и ему сообщение не отправлялось', thread_name=self.getName())
@@ -158,9 +161,18 @@ class TeamSpeakServerBot(Thread):
                             if self.module_config.get('wg_auth_bot').get('move_to_default_channel') == 'enable':
                                 self.ts3.clientmove(clid=event_data.get("clid"), cid=self.return_default_channel_id())
                         elif data["verify"] == 'AuthorizationRequired':
-                            message = self.module_config.get('wg_auth_bot').get('message_authorization_required') % str(
-                                self.module_config.get('wg_auth_bot').get('url')) + '/' + str(data["verify_id"])
-
+                            if self.module_config.get('wg_auth_bot').get('message_type') == 'message':
+                                message = self.module_config.get('wg_auth_bot').get(
+                                    'message_authorization_required') % str(
+                                    str(
+                                        self.module_config.get('wg_auth_bot').get('url')) + '/' + str(
+                                        data["verify_id"]))
+                            elif self.module_config.get('wg_auth_bot').get('message_type') == 'poke':
+                                result = self.module_config.get('wg_auth_bot').get(
+                                    'message_authorization_required').split('-')
+                                message = result[0]
+                                url = result[1] % str(str(self.module_config.get('wg_auth_bot').get('url')) + '/' + str(
+                                    data["verify_id"]))
                         if self.module_config.get('wg_auth_bot').get('message_type') == 'message':
                             self.ts3.sendtextmessage(targetmode=1, target=event_data.get("clid"),
                                                      msg=message)
@@ -168,6 +180,11 @@ class TeamSpeakServerBot(Thread):
                                 "clid") + ' было отправлено сообщение "' + message + '"', thread_name=self.getName())
                         elif self.module_config.get('wg_auth_bot').get('message_type') == 'poke':
                             self.ts3.clientpoke(clid=event_data.get("clid"), msg=message)
+                            if url != None:
+                                self.ts3.clientpoke(clid=event_data.get("clid"), msg=url)
+                                log_add('info', 'пользователю с id ' + event_data.get(
+                                    "clid") + ' было отправлено сообщение "' + url + '"',
+                                        thread_name=self.getName())
                             log_add('info', 'пользователю с id ' + event_data.get(
                                 "clid") + ' было отправлено сообщение "' + message + '"', thread_name=self.getName())
 
